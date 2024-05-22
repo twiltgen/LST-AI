@@ -17,6 +17,7 @@ import argparse
 
 from LST_AI.strip import run_hdbet, apply_mask
 from LST_AI.register import mni_registration, apply_warp, rigid_reg
+from LST_AI.bias_field_correction import run_N4
 from LST_AI.segment import unet_segmentation
 from LST_AI.annotate import annotate_lesions
 from LST_AI.stats import compute_stats
@@ -80,6 +81,11 @@ if __name__ == "__main__":
                         action='store_true',
                         dest='stripped',
                         help='Images are already skull stripped. Skip skull-stripping.')
+    
+    parser.add_argument('--N4correction',
+                        action='store_true',
+                        dest='N4correction',
+                        help='Apply N4 bias field correction.')
 
     # Model Settings
     parser.add_argument('--threshold',
@@ -137,6 +143,10 @@ if __name__ == "__main__":
     path_mni_flair = os.path.join(work_dir, 'sub-X_ses-Y_space-mni_FLAIR.nii.gz')
     path_mni_stripped_t1w = os.path.join(work_dir, 'sub-X_ses-Y_space-mni_desc-stripped_T1w.nii.gz')
     path_mni_stripped_flair = os.path.join(work_dir, 'sub-X_ses-Y_space-mni_desc-stripped_FLAIR.nii.gz')
+    path_mni_stripped_N4_t1w = os.path.join(work_dir, 'sub-X_ses-Y_space-mni_desc-stripped#biascorr_T1w.nii.gz')
+    path_mni_stripped_N4_t1w_field = os.path.join(work_dir, 'sub-X_ses-Y_space-mni_desc-stripped#biascorr_T1w_bias-field.nii.gz')
+    path_mni_stripped_N4_flair = os.path.join(work_dir, 'sub-X_ses-Y_space-mni_desc-stripped#biascorr_FLAIR.nii.gz')
+    path_mni_stripped_N4_flair_field = os.path.join(work_dir, 'sub-X_ses-Y_space-mni_desc-stripped#biascorr_FLAIR_bias-field.nii.gz')
 
     # Masks
     path_orig_brainmask_t1w = os.path.join(work_dir, 'sub-X_ses-Y_space-t1w_brainmask.nii.gz')
@@ -315,15 +325,35 @@ if __name__ == "__main__":
                         output_image=path_org_stripped_flair)
 
 
+        if args.N4correction:
+            print("Images need to be N4 bias corrected. Processing with ANTs.")
+            run_N4(input_image=path_mni_stripped_t1w,
+                   output_image=path_mni_stripped_N4_t1w,
+                   bias_field=path_mni_stripped_N4_t1w_field)
+            
+            run_N4(input_image=path_mni_stripped_flair,
+                   output_image=path_mni_stripped_N4_flair,
+                   bias_field=path_mni_stripped_N4_flair_field)
+            
+
         # Segmentation
         print("Running LST Segmentation.")
-        unet_segmentation(mni_t1=path_mni_stripped_t1w,
-                        mni_flair=path_mni_stripped_flair,
-                        model_path=model_directory,
-                        output_segmentation_path=path_mni_segmentation,
-                        device=args.device,
-                        input_shape=(192,192,192),
-                        threshold=args.threshold)
+        if args.N4correction:
+            unet_segmentation(mni_t1=path_mni_stripped_N4_t1w,
+                              mni_flair=path_mni_stripped_N4_flair,
+                              model_path=model_directory,
+                              output_segmentation_path=path_mni_segmentation,
+                              device=args.device,
+                              input_shape=(192,192,192),
+                              threshold=args.threshold)
+        else:
+            unet_segmentation(mni_t1=path_mni_stripped_t1w,
+                              mni_flair=path_mni_stripped_flair,
+                              model_path=model_directory,
+                              output_segmentation_path=path_mni_segmentation,
+                              device=args.device,
+                              input_shape=(192,192,192),
+                              threshold=args.threshold)
 
         apply_warp(image_org_space=path_org_stripped_flair,
                     affine=path_affine_mni_flair,
