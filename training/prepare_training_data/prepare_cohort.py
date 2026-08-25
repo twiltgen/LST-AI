@@ -63,7 +63,7 @@ def find_sessions(bids_root, mask_root, flair_suffix, t1_suffix, mask_suffix, ch
         session_id = flair.name[: -len(f"_{flair_suffix}")]
         anat_rel = flair.parent.relative_to(bids_root)
         mask = Path(os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}"))
-        t1 = Path(os.path.join(flair.parent, f"{session_id}_{t1_suffix}") if channels == 2 else None)
+        t1 = flair.parent / f"{session_id}_{t1_suffix}" if channels == 2 else None
 
         missing = [str(p) for p in ([mask, t1] if t1 else [mask]) if not p.exists()]
         if missing:
