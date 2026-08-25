@@ -38,7 +38,31 @@ MANIFEST_FIELDS = ['session_id', 'complete', 'prepared', 'flair_in', 't1_in', 'm
 
 
 def manifest_row(session_id, flair, t1, mask, complete, prepared='no'):
-    """A row with the input side filled in; the caller adds the output side."""
+    """
+    Return a dict with the manifest columns pre-filled for this session.
+
+    Parameters
+    ----------
+    session_id : str
+        The session identifier, e.g. sub-01_ses-01.
+    flair : str
+        Path to the FLAIR image.
+    t1 : str or None
+        Path to the T1w image, or None if not used.
+    mask : str
+        Path to the lesion mask.
+    complete : str
+        'yes' if all required files exist, 'no' otherwise.
+    prepared : str, optional
+        'yes' if the session has already been processed, 'no' otherwise (default: 'no').
+    
+    Returns
+    -------
+    dict
+        A dictionary with keys corresponding to MANIFEST_FIELDS, pre-filled with the
+        provided values and empty strings for the output fields.
+
+    """
     row = {k: '' for k in MANIFEST_FIELDS}
     row.update(session_id=session_id, complete=complete, prepared=prepared,
                flair_in=flair, t1_in=t1 or '', mask_in=mask)
@@ -46,17 +70,50 @@ def manifest_row(session_id, flair, t1, mask, complete, prepared='no'):
 
 
 def lesion_mm3(path):
-    """Lesion volume in mm3. dataobj avoids the float64 copy get_fdata() makes."""
+    """
+    Calculates the lesion volume in mm3. 
+    The function loads a NIfTI file from the given path, counts the number of voxels that are greater than zero (indicating the presence of a lesion), 
+    and multiplies this count by the volume of a single voxel (derived from the image header) to obtain the total lesion volume in cubic millimeters.
+
+    Parameters
+    ----------
+    path : str
+        Path to the lesion mask NIfTI file.
+
+    Returns
+    -------
+    float
+        The volume of the lesion in cubic millimeters. If the mask is empty, returns 0.0.
+
+    """
     img = nib.load(path)
     voxels = int((np.asarray(img.dataobj) > 0).sum())
     return voxels * float(np.prod(img.header.get_zooms()[:3]))
 
 
 def lesion_check(row, mask_in, seg_out):
-    """Fill the sanity-check columns and return (mm3 in, mm3 out, retained).
+    """
+    Conducts a lesion volume check and updates the manifest row with the results.
+    The volume of the lesion in the input mask and the output segmentation is calculated,
+    and the fraction of the lesion retained after processing is computed. The manifest row
+    is updated with these values.
 
-    A mask that was not in native FLAIR space warps to a valid but near-empty
-    file, so compare the volume rather than trusting that the warp succeeded.
+    Parameters
+    ----------
+    row : dict
+        The manifest row to be updated with lesion volume information.
+    mask_in : str
+        Path to the input lesion mask NIfTI file.
+    seg_out : str
+        Path to the output segmentation NIfTI file.
+
+    Returns
+    -------
+    tuple
+        A tuple containing:
+        - mm3_in (float): The volume of the lesion in the input mask in cubic millimeters.
+        - mm3_out (float): The volume of the lesion in the output segmentation in cubic millimeters.
+        - retained (float): The fraction of the lesion volume retained after processing. If the input mask is empty, this will be 1.0. 
     """
     mm3_in, mm3_out = lesion_mm3(mask_in), lesion_mm3(seg_out)
     retained = mm3_out / mm3_in if mm3_in else 1.0   # an empty mask loses nothing
@@ -67,40 +124,74 @@ def lesion_check(row, mask_in, seg_out):
 
 
 def find_sessions(bids_root, mask_root, flair_suffix, t1_suffix, mask_suffix, channels):
-    """Return one (id, flair, t1 or None, mask, missing) per FLAIR found.
+    """
+    Finds all sessions in the BIDS dataset by globbing for FLAIR files with the specified suffix.
+    For each FLAIR file found, it derives the corresponding T1w and lesion mask paths based on the session prefix and checks for their existence. 
+    It returns a list of tuples containing the session ID, FLAIR path, T1w path (or None if not used), lesion mask path, and a list of any missing files.
 
-    ``missing`` lists the siblings that do not exist, so an incomplete session is
-    still reported rather than dropped. Globs sub-*/ses-*/anat explicitly rather
-    than recursively, so a derivatives/ tree inside the BIDS root is never
-    mistaken for subject data.
+    Parameters
+    ----------
+    bids_root : str
+        The root directory of the BIDS dataset.
+    mask_root : str
+        The root directory to search for lesion masks. Defaults to bids_root if not specified.
+    flair_suffix : str
+        The suffix used to identify FLAIR files (e.g., 'FLAIR.nii.gz').
+    t1_suffix : str
+        The suffix used to identify T1w files (e.g., 'T1w.nii.gz').
+    mask_suffix : str
+        The suffix used to identify lesion mask files (e.g., 'label-lesion_mask.nii.gz').
+    channels : int
+        The number of channels to use (1 for FLAIR only, 2 for FLAIR + T1w). If channels is 1, the T1w path will be set to None.
+    
+    Returns
+    -------
+    list of tuples
+        A list of tuples, each containing:
+        - session_id (str): The session identifier (e.g., 'sub-01_ses-01').
+        - flair (str): The path to the FLAIR image.
+        - t1 (str or None): The path to the T1w image, or None if not used.
+        - mask (str): The path to the lesion mask.
+        - missing (list of str): A list of any missing files for the session. If all required files are present, this list will be empty.
     """
     flair_paths = sorted(glob.glob(os.path.join(bids_root, 'sub-*', 'ses-*', 'anat', f'*_{flair_suffix}')))
     if not flair_paths:   # sessionless BIDS
         flair_paths = sorted(glob.glob(os.path.join(bids_root, 'sub-*', 'anat', f'*_{flair_suffix}')))
 
+    # Empty when nothing matched; the caller reports that.
     sessions = []
-    # check if flair_paths has entries before proceeding to avoid errors
-    if not flair_paths:
-        print(f"No FLAIR files found with suffix '{flair_suffix}' in {bids_root}.")
-        return sessions
-    else:
-        # collect the session information for each FLAIR found
-        for flair in flair_paths:
-            # The session id is the filename with the suffix stripped; the siblings are
-            # then that id plus their own suffix, in the same anat/ dir under each root.
-            anat_dir = os.path.dirname(flair)
-            session_id = os.path.basename(flair)[: -len(f"_{flair_suffix}")]
-            anat_rel = os.path.relpath(anat_dir, bids_root)
-            mask = os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}")
-            t1 = os.path.join(anat_dir, f"{session_id}_{t1_suffix}") if channels == 2 else None
+    for flair in flair_paths:
+        # The session id is the filename with the suffix stripped; the siblings are
+        # then that id plus their own suffix, in the same anat/ dir under each root.
+        anat_dir = os.path.dirname(flair)
+        session_id = os.path.basename(flair)[: -len(f"_{flair_suffix}")]
+        anat_rel = os.path.relpath(anat_dir, bids_root)
+        mask = os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}")
+        t1 = os.path.join(anat_dir, f"{session_id}_{t1_suffix}") if channels == 2 else None
 
-            missing = [p for p in ([mask, t1] if t1 else [mask]) if not os.path.exists(p)]
-            sessions.append((session_id, flair, t1, mask, missing))
-        return sessions
+        missing = [p for p in ([mask, t1] if t1 else [mask]) if not os.path.exists(p)]
+        sessions.append((session_id, flair, t1, mask, missing))
+    return sessions
 
 
 def expected_outputs(output, session_id, channels):
-    """The files preprocess_session writes, keyed as it keys them."""
+    """
+    Returns the expected output paths for a given session, based on the output directory, session ID, and number of channels.
+
+    Parameters
+    ----------
+    output : str
+        The parent directory for the per-session output directories.
+    session_id : str
+        The session identifier (e.g., 'sub-01_ses-01').
+    channels : int
+        The number of channels to use (1 for FLAIR only, 2 for FLAIR + T1w). If channels is 1, the T1w output path will be set to None.
+    
+    Returns
+    -------
+    dict
+        A dictionary containing the expected output paths for the FLAIR, T1w (if applicable), and segmentation files, with keys 'flair', 't1', and 'seg'.
+    """
     session_dir = os.path.join(output, session_id)
     paths = {n: os.path.join(session_dir, f"{session_id}_{n}.nii.gz") for n in ('flair', 'seg')}
     paths['t1'] = os.path.join(session_dir, f"{session_id}_t1.nii.gz") if channels == 2 else None
@@ -126,13 +217,17 @@ def main():
                         help='Everything after "<session_id>_" in the FLAIR filename.')
     parser.add_argument('--t1_suffix', default='T1w.nii.gz', type=str,
                         help='Everything after "<session_id>_" in the T1w filename.')
-    parser.add_argument('--mask_suffix', default='label-lesion_mask.nii.gz', type=str,
+    parser.add_argument('--mask_suffix', default='space-FLAIR_label-lesion_mask.nii.gz', type=str,
                         help='Everything after "<session_id>_" in the lesion mask filename.')
 
     parser.add_argument('--manifest', default=None, type=str,
                         help='Manifest CSV path (default: <output>/prepare_cohort_manifest.csv).')
     parser.add_argument('--overwrite', action='store_true',
                         help='Reprocess sessions whose outputs already exist.')
+    parser.add_argument('--dry_run', action='store_true',
+                        help='List the resolved inputs and output names, then exit. '
+                             'Use it to check the suffixes: a wrong one changes the '
+                             'session id silently rather than failing.')
     parser.add_argument('--min_lesion_retention', default=0.8, type=float,
                         help='Warn when the warped mask keeps less than this fraction of '
                              'its original volume (default: 0.8).')
@@ -191,6 +286,17 @@ def main():
             todo.append(session)
     if prepared:
         print()
+
+    if args.dry_run:
+        for session_id, flair, t1, mask, _ in todo:
+            print(f"  {session_id}")
+            print(f"    flair {flair}")
+            if t1:
+                print(f"    t1    {t1}")
+            print(f"    mask  {mask}")
+            print(f"    out   {os.path.join(output, session_id)}{os.sep}")
+        print(f"\nDry run: {len(todo)} session(s) would be processed. Nothing written.")
+        return 0
 
     # create the output directory and manifest path, then process each session
     os.makedirs(output, exist_ok=True)
