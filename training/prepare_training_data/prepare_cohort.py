@@ -249,8 +249,12 @@ def main():
                           f"warp. Is {os.path.basename(mask)} really in native FLAIR space?")
 
             # One bad session must not end the cohort run. KeyboardInterrupt still stops it.
-            except Exception:
-                row['error'] = traceback.format_exc(limit=1).strip().replace('\n', ' ')
+            except Exception as exc:
+                # One greppable line; the full traceback goes to stderr below.
+                frame = traceback.extract_tb(exc.__traceback__)[-1]
+                row['error'] = (f"{type(exc).__name__}: {exc} "
+                                f"[{os.path.basename(frame.filename)}:{frame.lineno}]"
+                                ).replace('\n', ' ')[:300]
                 n_failed += 1
                 print(f"  FAILED after {time.time() - t0:.0f}s", file=sys.stderr)
                 traceback.print_exc()
