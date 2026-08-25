@@ -21,11 +21,11 @@ threaded via --threads.
 """
 import argparse
 import csv
+import glob
 import os
 import sys
 import time
 import traceback
-from pathlib import Path
 
 import nibabel as nib
 import numpy as np
@@ -39,7 +39,7 @@ MANIFEST_FIELDS = ['session_id', 'status', 'seconds', 'flair_in', 't1_in', 'mask
 
 def lesion_mm3(path):
     """Lesion volume in mm3. dataobj avoids the float64 copy get_fdata() makes."""
-    img = nib.load(str(path))
+    img = nib.load(path)
     voxels = int((np.asarray(img.dataobj) > 0).sum())
     return voxels * float(np.prod(img.header.get_zooms()[:3]))
 
@@ -50,22 +50,21 @@ def find_sessions(bids_root, mask_root, flair_suffix, t1_suffix, mask_suffix, ch
     Globs sub-*/ses-*/anat explicitly rather than recursively, so a derivatives/
     tree inside the BIDS root is never mistaken for subject data.
     """
-    bids_root, mask_root = Path(bids_root), Path(mask_root)
-
-    flair_paths = sorted(bids_root.glob(f"sub-*/ses-*/anat/*_{flair_suffix}"))
+    flair_paths = sorted(glob.glob(os.path.join(bids_root, 'sub-*', 'ses-*', 'anat', f'*_{flair_suffix}')))
     if not flair_paths:   # sessionless BIDS
-        flair_paths = sorted(bids_root.glob(f"sub-*/anat/*_{flair_suffix}"))
+        flair_paths = sorted(glob.glob(os.path.join(bids_root, 'sub-*', 'anat', f'*_{flair_suffix}')))
 
     sessions, incomplete = [], []
     for flair in flair_paths:
         # The session id is the filename with the suffix stripped; the siblings are
         # then that id plus their own suffix, in the same anat/ dir under each root.
-        session_id = flair.name[: -len(f"_{flair_suffix}")]
-        anat_rel = flair.parent.relative_to(bids_root)
-        mask = Path(os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}"))
-        t1 = flair.parent / f"{session_id}_{t1_suffix}" if channels == 2 else None
+        anat_dir = os.path.dirname(flair)
+        session_id = os.path.basename(flair)[: -len(f"_{flair_suffix}")]
+        anat_rel = os.path.relpath(anat_dir, bids_root)
+        mask = os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}")
+        t1 = os.path.join(anat_dir, f"{session_id}_{t1_suffix}") if channels == 2 else None
 
-        missing = [str(p) for p in ([mask, t1] if t1 else [mask]) if not p.exists()]
+        missing = [p for p in ([mask, t1] if t1 else [mask]) if not os.path.exists(p)]
         if missing:
             incomplete.append((session_id, f"missing: {', '.join(missing)}"))
         else:
@@ -75,9 +74,9 @@ def find_sessions(bids_root, mask_root, flair_suffix, t1_suffix, mask_suffix, ch
 
 def expected_outputs(output, session_id, channels):
     """The files preprocess_session writes -- used to skip sessions already done."""
-    session_dir = Path(os.path.join(output, session_id))
+    session_dir = os.path.join(output, session_id)
     names = ['flair', 'seg'] + (['t1'] if channels == 2 else [])
-    return [session_dir / f"{session_id}_{n}.nii.gz" for n in names]
+    return [os.path.join(session_dir, f"{session_id}_{n}.nii.gz") for n in names]
 
 
 def main():
@@ -154,7 +153,7 @@ def main():
     # check which sessions are already done and which need to be processed
     todo = []
     for session in sessions:
-        done = all(p.exists() for p in expected_outputs(output, session[0], args.channels))
+        done = all(os.path.exists(p) for p in expected_outputs(output, session[0], args.channels))
         if done and not args.overwrite:
             print(f"  skip {session[0]}: already prepared (use --overwrite to redo)")
         else:
@@ -180,16 +179,16 @@ def main():
             # Pre-filled so a failed session still records what it was given.
             row = {k: '' for k in MANIFEST_FIELDS}
             row.update(session_id=session_id, 
-                       flair_in=str(flair), 
-                       mask_in=str(mask),
-                       t1_in=str(t1) if t1 else '')
+                       flair_in=flair, 
+                       mask_in=mask,
+                       t1_in=t1 or '')
             t0 = time.time()
             try:
-                written = preprocess_session(flair=str(flair),
-                                             gt_seg=str(mask),
+                written = preprocess_session(flair=flair,
+                                             gt_seg=mask,
                                              output=output,
                                              session_id=session_id,
-                                             t1=str(t1) if t1 else None,
+                                             t1=t1,
                                              fast=args.fast,
                                              device=args.device,
                                              threads=args.threads)
@@ -212,7 +211,7 @@ def main():
                 if retained < args.min_lesion_retention:
                     n_warned += 1
                     print(f"  WARNING: only {retained:.1%} of the lesion volume survived the "
-                          f"warp. Is {mask.name} really in native FLAIR space?")
+                          f"warp. Is {os.path.basename(mask)} really in native FLAIR space?")
 
             # One bad session must not end the cohort run. KeyboardInterrupt still stops it.
             except Exception:
