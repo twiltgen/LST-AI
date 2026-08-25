@@ -79,18 +79,24 @@ def find_sessions(bids_root, mask_root, flair_suffix, t1_suffix, mask_suffix, ch
         flair_paths = sorted(glob.glob(os.path.join(bids_root, 'sub-*', 'anat', f'*_{flair_suffix}')))
 
     sessions = []
-    for flair in flair_paths:
-        # The session id is the filename with the suffix stripped; the siblings are
-        # then that id plus their own suffix, in the same anat/ dir under each root.
-        anat_dir = os.path.dirname(flair)
-        session_id = os.path.basename(flair)[: -len(f"_{flair_suffix}")]
-        anat_rel = os.path.relpath(anat_dir, bids_root)
-        mask = os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}")
-        t1 = os.path.join(anat_dir, f"{session_id}_{t1_suffix}") if channels == 2 else None
+    # check if flair_paths has entries before proceeding to avoid errors
+    if not flair_paths:
+        print(f"No FLAIR files found with suffix '{flair_suffix}' in {bids_root}.")
+        return sessions
+    else:
+        # collect the session information for each FLAIR found
+        for flair in flair_paths:
+            # The session id is the filename with the suffix stripped; the siblings are
+            # then that id plus their own suffix, in the same anat/ dir under each root.
+            anat_dir = os.path.dirname(flair)
+            session_id = os.path.basename(flair)[: -len(f"_{flair_suffix}")]
+            anat_rel = os.path.relpath(anat_dir, bids_root)
+            mask = os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}")
+            t1 = os.path.join(anat_dir, f"{session_id}_{t1_suffix}") if channels == 2 else None
 
-        missing = [p for p in ([mask, t1] if t1 else [mask]) if not os.path.exists(p)]
-        sessions.append((session_id, flair, t1, mask, missing))
-    return sessions
+            missing = [p for p in ([mask, t1] if t1 else [mask]) if not os.path.exists(p)]
+            sessions.append((session_id, flair, t1, mask, missing))
+        return sessions
 
 
 def expected_outputs(output, session_id, channels):
