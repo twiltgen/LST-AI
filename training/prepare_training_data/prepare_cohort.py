@@ -9,9 +9,9 @@ Writes one <session_id>/ directory per session under --output, plus a manifest C
 
 Expected layout (every suffix is configurable):
 
-    <bids_root>/sub-X/ses-Y/anat/sub-X_ses-Y_space-mni_FLAIR.nii.gz
-    <bids_root>/sub-X/ses-Y/anat/sub-X_ses-Y_space-mni_T1w.nii.gz
-    <mask_root>/sub-X/ses-Y/anat/sub-X_ses-Y_space-mni_label-lesion_mask.nii.gz
+    <bids_root>/sub-X/ses-Y/anat/sub-X_ses-Y_FLAIR.nii.gz
+    <bids_root>/sub-X/ses-Y/anat/sub-X_ses-Y_T1w.nii.gz
+    <mask_root>/sub-X/ses-Y/anat/sub-X_ses-Y_space-FLAIR_label-lesion_mask.nii.gz
 
 --mask_root defaults to --bids_root; point it at a derivatives pipeline when the
 masks live there, as in derivatives/manual_segmentation.
@@ -59,7 +59,7 @@ def lesion_check(row, mask_in, seg_out):
     file, so compare the volume rather than trusting that the warp succeeded.
     """
     mm3_in, mm3_out = lesion_mm3(mask_in), lesion_mm3(seg_out)
-    retained = mm3_out / mm3_in if mm3_in else 0.0
+    retained = mm3_out / mm3_in if mm3_in else 1.0   # an empty mask loses nothing
     row.update(lesion_mm3_in=f"{mm3_in:.0f}",
                lesion_mm3_out=f"{mm3_out:.0f}",
                lesion_retained=f"{retained:.3f}")
