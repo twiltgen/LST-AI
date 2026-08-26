@@ -93,6 +93,7 @@ def _run_epoch(model, loader, criterion, device, optimizer=None, amp=False):
         images = images.to(device, non_blocking=True)
         targets = [t.to(device, non_blocking=True) for t in targets]
 
+        # forward; deep-supervision heads come back as a list, full resolution first
         with torch.set_grad_enabled(training):
             with torch.autocast(device_type=device.type, enabled=amp):
                 outputs = model(images)
@@ -100,6 +101,7 @@ def _run_epoch(model, loader, criterion, device, optimizer=None, amp=False):
                     outputs = [outputs]
                 loss, parts = criterion(outputs, targets[: len(outputs)])
 
+        # backward, through the AMP scaler when mixed precision is on
         if training:
             optimizer.zero_grad(set_to_none=True)
             if scaler is not None:
@@ -110,6 +112,7 @@ def _run_epoch(model, loader, criterion, device, optimizer=None, amp=False):
                 loss.backward()
                 optimizer.step()
 
+        # accumulate the per-head losses plus dice on the full-resolution head
         for k, v in parts.items():
             totals[k] = totals.get(k, 0.0) + v
         dice_sum += float(dice_binary(targets[0], outputs[0].detach().float()))
@@ -129,6 +132,7 @@ def train(args) -> Path:
     ds_layers = tuple(args.ds_layers)
     n_ds = len(ds_layers)
 
+    # data: one downsampled target per deep-supervision head, augmentation on train only
     train_ds = MSDataset(args.train_data, shape=tuple(args.shape),
                          in_channels=args.in_channels, augment=not args.no_augment,
                          aug_prob=args.aug_prob, n_deep_supervision=n_ds)
@@ -144,22 +148,27 @@ def train(args) -> Path:
                                 num_workers=args.workers, collate_fn=collate,
                                 pin_memory=device.type == "cuda")
 
+    # model
     model = NNUNet3D(in_channels=args.in_channels, n_conv_blocks=args.conv_blocks,
                      n_filters=args.filters, ds_layers=ds_layers,
                      bottleneck_filters=args.bottleneck_filters).to(device)
     model.check_input_shape(tuple(args.shape))
 
+    # loss: a preset overrides the individual --loss-out/--loss-ds flags
     preset = TRAINING_PRESETS.get(args.preset)
     loss_out = LOSSES[preset["loss_out"] if preset else args.loss_out]
     loss_ds = LOSSES[preset["loss_ds"] if preset else args.loss_ds]
     criterion = DeepSupervisionLoss(loss_out=loss_out, loss_ds=loss_ds,
                                     weights=DS_WEIGHTS[: n_ds + 1])
 
+    # SGD with the cosine schedule stretched over --epochs
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, nesterov=True)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda e: cosine_annealing(e, args.epochs))
     _run_epoch._scaler = torch.amp.GradScaler(device.type) if args.amp else None
 
+    # output dir, run name, and the config saved next to the weights so inference
+    # can rebuild the same architecture
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     name = args.name or args.preset or f"nnUNet_{args.in_channels}ch"
@@ -177,6 +186,7 @@ def train(args) -> Path:
         tb_dir = Path(args.tensorboard) if args.tensorboard is not True else out_dir / "tb" / name
     board = _TensorBoard(tb_dir)
 
+    # training loop: one train pass, optional val pass, checkpoint, log
     history, best = [], float("inf")
     best_path = out_dir / f"UNet3D_MS_lowestTrainLoss_{name}.pt"
     for epoch in range(args.epochs):
@@ -207,9 +217,11 @@ def train(args) -> Path:
         print(msg + f"  ({row['seconds']:.1f}s)")
 
         board.log(row, epoch)
+        # rewritten every epoch so the history survives an interrupted run
         (out_dir / f"UNet3D_MS_final_{name}.json").write_text(json.dumps(history, indent=1))
 
     board.close()
+    # last-epoch weights, kept alongside the best-loss checkpoint
     final_path = out_dir / f"UNet3D_MS_final_{name}.pt"
     torch.save({"variant": name, "config": config, "epoch": args.epochs - 1,
                 "state_dict": model.state_dict()}, final_path)
