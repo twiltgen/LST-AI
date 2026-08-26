@@ -90,7 +90,7 @@ to disable augmentation; `--shape` for a different crop; `--resume` to continue 
 interrupted run.
 
 Each invocation trains **one** model. The released ensemble is three, so reproducing it
-means three runs — differing in topology and `--seed` — whose checkpoints are then averaged
+means three runs (differing in topology and `--seed`) whose checkpoints are then averaged
 at inference:
 
 ```bash
