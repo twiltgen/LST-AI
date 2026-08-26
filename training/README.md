@@ -33,8 +33,40 @@ One directory per subject, discovered by globbing for FLAIR:
 
 Volumes must be skull-stripped and in MNI space — background is taken to be exactly zero,
 and the brain mask is derived as `flair != 0`. Use `lst_ai`'s own registration and
-stripping to prepare a cohort, then train on the MNI-space intermediates it leaves in
-`--temp`.
+stripping to prepare a cohort (the next section does exactly that for a BIDS dataset).
+
+## Prepare a BIDS cohort
+
+`prepare_training_data/prepare_cohort.py` turns a raw BIDS dataset into the layout above.
+It globs `sub-*/ses-*/anat/` for the FLAIR, derives the T1w and lesion mask from the same
+session prefix, registers to MNI, skull-strips with HD-BET, and warps the mask to match:
+
+```bash
+python prepare_cohort.py \
+  --bids_root /data/cohort \
+  --mask_root /data/cohort/derivatives/manual_segmentation \
+  --output    data/train \
+  --channels  2
+```
+
+Each filename is read as `<session_id>_<suffix>`, so `--flair_suffix`, `--t1_suffix` and
+`--mask_suffix` describe the cohort and the session id is whatever the FLAIR suffix leaves
+behind. `--mask_root` defaults to `--bids_root`; point it at a derivatives pipeline when the
+masks live there. Run `--dry_run` first; a suffix that matches the wrong part of a filename
+changes the session id rather than failing.
+
+The ground truth must be in **native FLAIR space**; it is warped with the FLAIR affine. The
+two modes are not interchangeable: with `--channels 2` the FLAIR reaches MNI through the T1
+and is stripped with the T1's brain mask (identical to the 2-channel LST-AI workflow), with 
+`--channels 1` the FLAIR goes straight to the atlas and is stripped directly. Prepare a cohort 
+in the mode you intend to train.
+
+Sessions run one at a time, a failure never stops the run, and re-running skips what is
+already done (`--overwrite` redoes it). A manifest CSV in `--output` records every session
+found along with its lesion volume before and after the warp: a mask that was not in FLAIR
+space warps to a valid but near-empty file, so check the `lesion_retained` column rather
+than trusting that the run succeeded. Then point `--train-data` straight at `--output`.
+`preprocess_session.py` does the same work for a single session.
 
 ## Train
 
