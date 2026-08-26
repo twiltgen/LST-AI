@@ -86,7 +86,37 @@ validation). `--preset` selects one of the four loss combinations the original s
 
 Useful flags: `--filters`, `--conv-blocks`, `--bottleneck-filters` and `--ds-layers` to
 reproduce a specific released variant; `--amp` for mixed precision on CUDA; `--no-augment`
-to disable augmentation; `--shape` for a different crop.
+to disable augmentation; `--shape` for a different crop; `--resume` to continue an
+interrupted run.
+
+Each invocation trains **one** model. The released ensemble is three, so reproducing it
+means three runs — differing in topology and `--seed` — whose checkpoints are then averaged
+at inference:
+
+```bash
+python -m lst_training.train --train-data data/train --name mdlA \
+    --filters 28 --bottleneck-filters 168 --ds-layers -2 -3 --seed 0
+python -m lst_training.train --train-data data/train --name mdlB \
+    --filters 24 --bottleneck-filters 144 --ds-layers -2    --seed 1
+python -m lst_training.train --train-data data/train --name mdlC \
+    --filters 32 --ds-layers -2 -3 --seed 2
+```
+
+Run them sequentially. They must share the same `--in-channels`; inference refuses
+a mixed ensemble.
+
+### Resuming an interrupted run
+
+Every epoch also writes `<out-dir>/UNet3D_MS_last_<name>.pt`, holding the model, 
+optimiser, schedule, GradScaler, best loss so far and the history to date. 
+Continue from it with **the same flags as the original run** and the `--resume` flag:
+
+```bash
+python -m lst_training.train <the original flags> \
+    --resume checkpoints/UNet3D_MS_last_<name>.pt
+```
+
+Training picks up at the next epoch and the JSON history continues as one record rather than restarting.
 
 ### Monitoring a run
 
@@ -137,6 +167,16 @@ Those two flags matter. LST-AI's training and inference code disagree on preproc
 `data_loader.py` rescales to `[-1, 1]` and masks both modalities with the FLAIR mask, while
 `segment.py` stops at `[0, 1]` and derives a mask per modality. A model trained here
 follows the loader, so serving it needs the loader's conventions.
+
+`--checkpoints` takes as many files as you like and averages their probabilities, so an
+ensemble is just the three names listed above:
+
+```bash
+--checkpoints checkpoints/UNet3D_MS_final_mdl{A,B,C}.pt
+```
+
+Each `.pt` carries its own `config`, so members with different topologies load correctly
+and need not match, only `--in-channels` has to agree across them.
 
 ## Tests
 

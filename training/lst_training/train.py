@@ -165,7 +165,20 @@ def train(args) -> Path:
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, nesterov=True)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda e: cosine_annealing(e, args.epochs))
-    _run_epoch._scaler = torch.amp.GradScaler(device.type) if args.amp else None
+    scaler = torch.amp.GradScaler(device.type) if args.amp else None
+    _run_epoch._scaler = scaler
+
+    # --resume: pick up a last.pt written by an earlier run
+    history, best, start_epoch = [], float("inf"), 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        if scaler is not None and ckpt.get("scaler") is not None:
+            scaler.load_state_dict(ckpt["scaler"])
+        history, best = ckpt["history"], ckpt["best"]
+        start_epoch = ckpt["epoch"] + 1
 
     # output dir, run name, and the config saved next to the weights so inference
     # can rebuild the same architecture
@@ -187,9 +200,11 @@ def train(args) -> Path:
     board = _TensorBoard(tb_dir)
 
     # training loop: one train pass, optional val pass, checkpoint, log
-    history, best = [], float("inf")
     best_path = out_dir / f"UNet3D_MS_lowestTrainLoss_{name}.pt"
-    for epoch in range(args.epochs):
+    last_path = out_dir / f"UNet3D_MS_last_{name}.pt"
+    if start_epoch:
+        print(f"resuming at epoch {start_epoch} (best out_seg {best:.4f})")
+    for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
         stats = _run_epoch(model, train_loader, criterion, device, optimizer, args.amp)
         row = {"epoch": epoch, "lr": scheduler.get_last_lr()[0],
@@ -217,7 +232,13 @@ def train(args) -> Path:
         print(msg + f"  ({row['seconds']:.1f}s)")
 
         board.log(row, epoch)
-        # rewritten every epoch so the history survives an interrupted run
+        # rewritten every epoch so an interrupted run can be resumed from here
+        torch.save({"variant": name, "config": config, "epoch": epoch, "best": best,
+                    "history": history, "state_dict": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "scaler": scaler.state_dict() if scaler is not None else None},
+                   last_path)
         (out_dir / f"UNet3D_MS_final_{name}.json").write_text(json.dumps(history, indent=1))
 
     board.close()
@@ -266,6 +287,10 @@ def build_argparser() -> argparse.ArgumentParser:
     r.add_argument("--workers", type=int, default=4)
     r.add_argument("--amp", action="store_true", help="mixed precision (CUDA)")
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--resume", default=None, metavar="LAST_PT",
+                   help="continue from a UNet3D_MS_last_<name>.pt: restores model, "
+                        "optimiser, schedule, history and best loss, and starts at the "
+                        "next epoch. Pass the same model/loss flags as the original run.")
     r.add_argument("--tensorboard", nargs="?", const=True, default=None, metavar="DIR",
                    help="log scalars to TensorBoard; defaults to <out-dir>/tb/<name>. "
                         "Needs `pip install tensorboard`. The JSON history is written "
