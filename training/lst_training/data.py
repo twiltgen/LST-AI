@@ -85,6 +85,12 @@ class MSDataset(Dataset):
         including the inverted sense of the name.
     n_deep_supervision : int
         How many extra coarsened targets to emit, matching ``len(model.ds_layers)``.
+    max_angle : int
+        Maximum rotation angle in degrees.
+    max_sigma : float
+        Maximum Gaussian blur sigma.
+    gamma_range : tuple[float, float]
+        Range of gamma values for intensity augmentation.
 
     Returns ``(image, targets)`` where ``image`` is ``(in_channels, *shape)`` and
     ``targets`` is a list of ``(1, ...)`` masks at full, 1/2, 1/4 ... resolution.
