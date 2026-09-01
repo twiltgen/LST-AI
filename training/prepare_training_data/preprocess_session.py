@@ -37,7 +37,7 @@ from lst_ai.register import mni_registration, rigid_reg, apply_warp_label
 from lst_ai.utils import DATA_DIR, download_data, harmonize_affines
 
 
-def _register_2channel(t1, flair, work_dir, stem, atlas, fast, device, threads):
+def register_strip_2channel(t1, flair, work_dir, stem, stripped, atlas, fast, device, threads):
     """T1w -> atlas, FLAIR -> MNI T1w; HD-BET on the T1w, its mask applied to the FLAIR."""
     mni_t1w = os.path.join(work_dir, f'{stem}_space-mni_T1w.nii.gz')
     mni_flair = os.path.join(work_dir, f'{stem}_space-mni_FLAIR.nii.gz')
@@ -56,19 +56,23 @@ def _register_2channel(t1, flair, work_dir, stem, atlas, fast, device, threads):
                      path_flair_affine=affine_flair, 
                      n_threads=threads)
 
-    run_hdbet(input_image=mni_t1w, 
-              output_image=stripped_t1w,
-              device=device, 
-              mode="fast" if fast else "accurate")
-    shutil.move(stripped_t1w.replace(".nii.gz", "_bet.nii.gz"), brainmask)
+    if stripped:
+        shutil.copy(mni_t1w, stripped_t1w)
+        shutil.copy(mni_flair, stripped_flair)
+    else:
+        run_hdbet(input_image=mni_t1w, 
+                output_image=stripped_t1w,
+                device=device, 
+                mode="fast" if fast else "accurate")
+        shutil.move(stripped_t1w.replace(".nii.gz", "_bet.nii.gz"), brainmask)
 
-    apply_mask(input_image=mni_flair, 
-               mask=brainmask, 
-               output_image=stripped_flair)
+        apply_mask(input_image=mni_flair, 
+                mask=brainmask, 
+                output_image=stripped_flair)
     return stripped_t1w, stripped_flair, affine_flair
 
 
-def _register_1channel(flair, work_dir, stem, atlas, fast, device, threads):
+def register_strip_1channel(flair, work_dir, stem, stripped, atlas, fast, device, threads):
     """FLAIR -> atlas directly, HD-BET on the FLAIR. No T1w involved."""
     mni_flair = os.path.join(work_dir, f'{stem}_space-mni_FLAIR.nii.gz')
     stripped_flair = os.path.join(work_dir, f'{stem}_space-mni_desc-stripped_FLAIR.nii.gz')
@@ -81,16 +85,19 @@ def _register_1channel(flair, work_dir, stem, atlas, fast, device, threads):
               destination=mni_flair, 
               n_threads=threads)
 
-    run_hdbet(input_image=mni_flair, 
-              output_image=stripped_flair,
-              device=device, 
-              mode="fast" if fast else "accurate")
-    shutil.move(stripped_flair.replace(".nii.gz", "_bet.nii.gz"), brainmask)
+    if stripped:
+        shutil.copy(mni_flair, stripped_flair)
+    else:
+        run_hdbet(input_image=mni_flair, 
+                output_image=stripped_flair,
+                device=device, 
+                mode="fast" if fast else "accurate")
+        shutil.move(stripped_flair.replace(".nii.gz", "_bet.nii.gz"), brainmask)
 
     return None, stripped_flair, affine_flair
 
 
-def preprocess_session(flair, gt_seg, output, session_id, t1=None,
+def preprocess_session(flair, gt_seg, output, session_id, stripped=False, t1=None,
                        fast=False, device='0', threads=None):
     """Preprocess one session. It deals with both 1-channel and 2-channel modes, depending on whether ``t1`` is None.
     First, it harmonizes the affines of the input images, then registers them to MNI space, 
@@ -106,6 +113,8 @@ def preprocess_session(flair, gt_seg, output, session_id, t1=None,
         Path to the output directory where the processed images will be saved.
     session_id : str
         Session identifier used as the stem of the output filenames.
+    stripped : bool
+        If True, assumes the images are already skull-stripped and skips the skull-stripping step.
     t1 : str, optional
         Path to the T1w image (zipped nifti). Required for 2-channel mode. Default is None (1-channel mode).
     fast : bool, optional
@@ -138,7 +147,10 @@ def preprocess_session(flair, gt_seg, output, session_id, t1=None,
 
     print(f"Looking for atlas files in {DATA_DIR}.")
     download_data(path=DATA_DIR)
-    atlas = os.path.join(DATA_DIR, "atlas", "sub-mni152_space-mni_t1.nii.gz")
+    if stripped:
+        atlas = os.path.join(DATA_DIR, "atlas", "sub-mni152_space-mni_t1bet.nii.gz")
+    else:
+        atlas = os.path.join(DATA_DIR, "atlas", "sub-mni152_space-mni_t1.nii.gz")
 
     work_dir = tempfile.mkdtemp(prefix='lst_ai_')
 
@@ -158,38 +170,42 @@ def preprocess_session(flair, gt_seg, output, session_id, t1=None,
             harmonize_affines(t1, harmonized_t1)
 
         # run registration and skull-stripping, depending on the number of channels
-        print("Images are registered to MNI. Processing with Greedy.")
-        if harmonized_t1 is not None:
-            stripped_t1w, stripped_flair, affine_flair = _register_2channel(t1=harmonized_t1, 
-                                                                            flair=harmonized_flair, 
-                                                                            work_dir=work_dir, 
-                                                                            stem=session_id, 
-                                                                            atlas=atlas, 
-                                                                            fast=fast, 
-                                                                            device=device, 
-                                                                            threads=threads)
+        print(f"{session_id}: Images are registered to MNI and skull-stripped...")
+        if t1 is not None:
+            stripped_t1w, stripped_flair, affine_flair = register_strip_2channel(t1=harmonized_t1, 
+                                                                                 flair=harmonized_flair, 
+                                                                                 work_dir=work_dir, 
+                                                                                 stem=session_id, 
+                                                                                 stripped=stripped,
+                                                                                 atlas=atlas, 
+                                                                                 fast=fast, 
+                                                                                 device=device, 
+                                                                                 threads=threads)
         else:
-            stripped_t1w, stripped_flair, affine_flair = _register_1channel(flair=harmonized_flair, 
-                                                                            work_dir=work_dir, 
-                                                                            stem=session_id, 
-                                                                            atlas=atlas, 
-                                                                            fast=fast, 
-                                                                            device=device, 
-                                                                            threads=threads)
+            stripped_t1w, stripped_flair, affine_flair = register_strip_1channel(flair=harmonized_flair, 
+                                                                                 work_dir=work_dir, 
+                                                                                 stem=session_id, 
+                                                                                 stripped=stripped,
+                                                                                 atlas=atlas, 
+                                                                                 fast=fast, 
+                                                                                 device=device, 
+                                                                                 threads=threads)
 
         # The ground truth is in native FLAIR space, so it needs to be registered using the FLAIR affine.
+        print(f"{session_id}: Ground truth segmentation is registered to MNI space...")
         mni_seg = os.path.join(work_dir, f'{session_id}_space-mni_seg-GT.nii.gz')
         apply_warp_label(image_org_space=stripped_flair,
-                        affine=affine_flair,
-                        origin=harmonized_seg,
-                        target=mni_seg,
-                        reverse=False,
-                        n_threads=threads)
+                         affine=affine_flair,
+                         origin=harmonized_seg,
+                         target=mni_seg,
+                         reverse=False,
+                         n_threads=threads)
 
         written = {'t1': None,
                 'flair': os.path.join(session_dir, f"{session_id}_flair.nii.gz"),
                 'seg': os.path.join(session_dir, f"{session_id}_seg.nii.gz")}
-        
+
+        print(f"{session_id}: Copy files to output directory...")
         shutil.copy(stripped_flair, written['flair'])
         shutil.copy(mni_seg, written['seg'])
 
@@ -197,7 +213,7 @@ def preprocess_session(flair, gt_seg, output, session_id, t1=None,
             written['t1'] = os.path.join(session_dir, f"{session_id}_t1.nii.gz")
             shutil.copy(stripped_t1w, written['t1'])
 
-        print(f"Results in {session_dir}")
+        print(f"{session_id}: Results in {session_dir}")
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -255,6 +271,11 @@ if __name__ == "__main__":
                         type=str,
                         required=True)
 
+    parser.add_argument('--stripped',
+                        action='store_true',
+                        dest='stripped',
+                        help='Images are already skull stripped. Skip skull-stripping.')
+
     # Fast mode
     parser.add_argument('--fast-mode',
                         action='store_true',
@@ -276,6 +297,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # check input
+    # channels
     if args.channels == 2 and not args.t1:
         parser.error("--channels 2 requires --t1.")
     if args.channels == 1 and args.t1:
@@ -285,6 +308,7 @@ if __name__ == "__main__":
                        gt_seg=args.ground_truth_seg,
                        output=args.output,
                        session_id=args.session_id,
+                       stripped=args.stripped,
                        t1=args.t1,
                        fast=args.fast,
                        device=args.device,

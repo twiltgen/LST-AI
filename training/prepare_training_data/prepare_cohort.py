@@ -232,6 +232,8 @@ def main():
                         help='Warn when the warped mask keeps less than this fraction of '
                              'its original volume (default: 0.8).')
 
+    parser.add_argument('--stripped', action='store_true', dest='stripped',
+                        help='Images are already skull stripped. Skip skull-stripping.')
     parser.add_argument('--fast-mode', action='store_true', dest='fast',
                         help='Only use one model for hd-bet.')
     parser.add_argument('--device', default='0', type=str,
@@ -264,6 +266,7 @@ def main():
     print(f"Mask root : {mask_root}")
     print(f"Output    : {output}")
     print(f"Mode      : {args.channels}-channel")
+    print(f"Stripping : {'skipped (inputs already skull-stripped)' if args.stripped else 'HD-BET'}")
     print(f"Found     : {len(complete)} complete session(s), {len(incomplete)} incomplete session(s)\n")
 
     for session_id, _, _, _, missing in incomplete:
@@ -342,6 +345,7 @@ def main():
                                              gt_seg=mask,
                                              output=output,
                                              session_id=session_id,
+                                             stripped=args.stripped,
                                              t1=t1,
                                              fast=args.fast,
                                              device=args.device,
