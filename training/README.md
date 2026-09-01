@@ -61,6 +61,10 @@ and is stripped with the T1's brain mask (identical to the 2-channel LST-AI work
 `--channels 1` the FLAIR goes straight to the atlas and is stripped directly. Prepare a cohort 
 in the mode you intend to train.
 
+Pass `--stripped` when the cohort is already skull-stripped: HD-BET is skipped and the
+registration targets the stripped MNI atlas, matching what `lst --stripped` does at
+inference.
+
 Sessions run one at a time, a failure never stops the run, and re-running skips what is
 already done (`--overwrite` redoes it). A manifest CSV in `--output` records every session
 found along with its lesion volume before and after the warp: a mask that was not in FLAIR
@@ -94,12 +98,12 @@ means three runs (differing in topology and `--seed`) whose checkpoints are then
 at inference:
 
 ```bash
-python -m lst_training.train --train-data data/train --name mdlA \
-    --filters 28 --bottleneck-filters 168 --ds-layers -2 -3 --seed 0
-python -m lst_training.train --train-data data/train --name mdlB \
-    --filters 24 --bottleneck-filters 144 --ds-layers -2    --seed 1
-python -m lst_training.train --train-data data/train --name mdlC \
-    --filters 32 --ds-layers -2 -3 --seed 2
+python -m lst_training.train --train-data training/data --out-dir training/model --name mdlA \
+    --in-channels 2 --filters 28 --bottleneck-filters 168 --ds-layers -2 -3 --seed 0
+python -m lst_training.train --train-data training/data --out-dir training/model --name mdlB \
+    --in-channels 2 --filters 24 --bottleneck-filters 144 --ds-layers -2    --seed 1
+python -m lst_training.train --train-data training/data --out-dir training/model --name mdlC \
+    --in-channels 2 --filters 32 --ds-layers -2 -3 --seed 2
 ```
 
 Run them sequentially. They must share the same `--in-channels`; inference refuses
