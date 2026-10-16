@@ -39,22 +39,27 @@ from skimage.exposure import adjust_gamma
 from skimage.measure import block_reduce
 from torch.utils.data import Dataset
 
-__all__ = ["MSDataset", "adapt_shape", "normalise_modality"]
+__all__ = ["MSDataset", "adapt_shape", "crop_slices", "normalise_modality"]
 
 
-def adapt_shape(volume: np.ndarray, shape: tuple[int, int, int]) -> np.ndarray:
-    """Centre-crop to ``shape``, biasing an odd remainder to the low side (as the TF code)."""
+def crop_slices(in_shape: tuple[int, ...], shape: tuple[int, int, int]) -> tuple[slice, ...]:
+    """The centre-crop window of ``adapt_shape``, biasing an odd remainder to the low side."""
     slices = []
-    for size, target in zip(volume.shape, shape):
+    for size, target in zip(in_shape, shape):
         diff = size - target
         if diff < 0:
             raise ValueError(
-                f"volume of shape {volume.shape} is smaller than the target {shape} along "
+                f"volume of shape {tuple(in_shape)} is smaller than the target {shape} along "
                 f"an axis ({size} < {target}); pad it or lower --shape"
             )
         start = (diff // 2) + (diff % 2)
         slices.append(slice(start, size - (diff // 2)))
-    return volume[tuple(slices)].astype(np.float32)
+    return tuple(slices)
+
+
+def adapt_shape(volume: np.ndarray, shape: tuple[int, int, int]) -> np.ndarray:
+    """Centre-crop to ``shape`` (as the TF code)."""
+    return volume[crop_slices(volume.shape, shape)].astype(np.float32)
 
 
 def normalise_modality(vol: np.ndarray, brain: np.ndarray) -> np.ndarray:
