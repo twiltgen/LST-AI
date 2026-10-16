@@ -21,15 +21,15 @@ threaded via --threads.
 """
 import argparse
 import csv
-import glob
 import os
 import sys
 import time
 import traceback
 
-import nibabel as nib
-import numpy as np
+# common.py sits one level up, beside the training/ and inference/ pipelines.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from common import find_sessions, lesion_check
 from preprocess_session import preprocess_session
 
 MANIFEST_FIELDS = ['session_id', 'complete', 'prepared', 'flair_in', 't1_in', 'mask_in',
@@ -37,25 +37,19 @@ MANIFEST_FIELDS = ['session_id', 'complete', 'prepared', 'flair_in', 't1_in', 'm
                    'lesion_retained', 'error']
 
 
-def manifest_row(session_id, flair, t1, mask, complete, prepared='no'):
+def manifest_row(session, complete, prepared='no'):
     """
     Return a dict with the manifest columns pre-filled for this session.
 
     Parameters
     ----------
-    session_id : str
-        The session identifier, e.g. sub-01_ses-01.
-    flair : str
-        Path to the FLAIR image.
-    t1 : str or None
-        Path to the T1w image, or None if not used.
-    mask : str
-        Path to the lesion mask.
+    session : common.Session
+        The discovered session, carrying its id and its input paths.
     complete : str
         'yes' if all required files exist, 'no' otherwise.
     prepared : str, optional
         'yes' if the session has already been processed, 'no' otherwise (default: 'no').
-    
+
     Returns
     -------
     dict
@@ -64,114 +58,9 @@ def manifest_row(session_id, flair, t1, mask, complete, prepared='no'):
 
     """
     row = {k: '' for k in MANIFEST_FIELDS}
-    row.update(session_id=session_id, complete=complete, prepared=prepared,
-               flair_in=flair, t1_in=t1 or '', mask_in=mask)
+    row.update(session_id=session.session_id, complete=complete, prepared=prepared,
+               flair_in=session.flair, t1_in=session.t1 or '', mask_in=session.mask)
     return row
-
-
-def lesion_mm3(path):
-    """
-    Calculates the lesion volume in mm3. 
-    The function loads a NIfTI file from the given path, counts the number of voxels that are greater than zero (indicating the presence of a lesion), 
-    and multiplies this count by the volume of a single voxel (derived from the image header) to obtain the total lesion volume in cubic millimeters.
-
-    Parameters
-    ----------
-    path : str
-        Path to the lesion mask NIfTI file.
-
-    Returns
-    -------
-    float
-        The volume of the lesion in cubic millimeters. If the mask is empty, returns 0.0.
-
-    """
-    img = nib.load(path)
-    voxels = int((np.asarray(img.dataobj) > 0).sum())
-    return voxels * float(np.prod(img.header.get_zooms()[:3]))
-
-
-def lesion_check(row, mask_in, seg_out):
-    """
-    Conducts a lesion volume check and updates the manifest row with the results.
-    The volume of the lesion in the input mask and the output segmentation is calculated,
-    and the fraction of the lesion retained after processing is computed. The manifest row
-    is updated with these values.
-
-    Parameters
-    ----------
-    row : dict
-        The manifest row to be updated with lesion volume information.
-    mask_in : str
-        Path to the input lesion mask NIfTI file.
-    seg_out : str
-        Path to the output segmentation NIfTI file.
-
-    Returns
-    -------
-    tuple
-        A tuple containing:
-        - mm3_in (float): The volume of the lesion in the input mask in cubic millimeters.
-        - mm3_out (float): The volume of the lesion in the output segmentation in cubic millimeters.
-        - retained (float): The fraction of the lesion volume retained after processing. If the input mask is empty, this will be 1.0. 
-    """
-    mm3_in, mm3_out = lesion_mm3(mask_in), lesion_mm3(seg_out)
-    retained = mm3_out / mm3_in if mm3_in else 1.0   # an empty mask loses nothing
-    row.update(lesion_mm3_in=f"{mm3_in:.0f}",
-               lesion_mm3_out=f"{mm3_out:.0f}",
-               lesion_retained=f"{retained:.3f}")
-    return mm3_in, mm3_out, retained
-
-
-def find_sessions(bids_root, mask_root, flair_suffix, t1_suffix, mask_suffix, channels):
-    """
-    Finds all sessions in the BIDS dataset by globbing for FLAIR files with the specified suffix.
-    For each FLAIR file found, it derives the corresponding T1w and lesion mask paths based on the session prefix and checks for their existence. 
-    It returns a list of tuples containing the session ID, FLAIR path, T1w path (or None if not used), lesion mask path, and a list of any missing files.
-
-    Parameters
-    ----------
-    bids_root : str
-        The root directory of the BIDS dataset.
-    mask_root : str
-        The root directory to search for lesion masks. Defaults to bids_root if not specified.
-    flair_suffix : str
-        The suffix used to identify FLAIR files (e.g., 'FLAIR.nii.gz').
-    t1_suffix : str
-        The suffix used to identify T1w files (e.g., 'T1w.nii.gz').
-    mask_suffix : str
-        The suffix used to identify lesion mask files (e.g., 'label-lesion_mask.nii.gz').
-    channels : int
-        The number of channels to use (1 for FLAIR only, 2 for FLAIR + T1w). If channels is 1, the T1w path will be set to None.
-    
-    Returns
-    -------
-    list of tuples
-        A list of tuples, each containing:
-        - session_id (str): The session identifier (e.g., 'sub-01_ses-01').
-        - flair (str): The path to the FLAIR image.
-        - t1 (str or None): The path to the T1w image, or None if not used.
-        - mask (str): The path to the lesion mask.
-        - missing (list of str): A list of any missing files for the session. If all required files are present, this list will be empty.
-    """
-    flair_paths = sorted(glob.glob(os.path.join(bids_root, 'sub-*', 'ses-*', 'anat', f'*_{flair_suffix}')))
-    if not flair_paths:   # sessionless BIDS
-        flair_paths = sorted(glob.glob(os.path.join(bids_root, 'sub-*', 'anat', f'*_{flair_suffix}')))
-
-    # Empty when nothing matched; the caller reports that.
-    sessions = []
-    for flair in flair_paths:
-        # The session id is the filename with the suffix stripped; the siblings are
-        # then that id plus their own suffix, in the same anat/ dir under each root.
-        anat_dir = os.path.dirname(flair)
-        session_id = os.path.basename(flair)[: -len(f"_{flair_suffix}")]
-        anat_rel = os.path.relpath(anat_dir, bids_root)
-        mask = os.path.join(mask_root, anat_rel, f"{session_id}_{mask_suffix}")
-        t1 = os.path.join(anat_dir, f"{session_id}_{t1_suffix}") if channels == 2 else None
-
-        missing = [p for p in ([mask, t1] if t1 else [mask]) if not os.path.exists(p)]
-        sessions.append((session_id, flair, t1, mask, missing))
-    return sessions
 
 
 def expected_outputs(output, session_id, channels):
@@ -186,7 +75,7 @@ def expected_outputs(output, session_id, channels):
         The session identifier (e.g., 'sub-01_ses-01').
     channels : int
         The number of channels to use (1 for FLAIR only, 2 for FLAIR + T1w). If channels is 1, the T1w output path will be set to None.
-    
+
     Returns
     -------
     dict
@@ -252,15 +141,16 @@ def main():
     assert os.path.isdir(mask_root), f'Mask root does not exist: {mask_root}'
     assert not os.path.isfile(output), 'Please provide an output path, not a filename.'
 
-    # every session found is reported, complete or not
-    sessions = find_sessions(bids_root=bids_root, 
-                             mask_root=mask_root, 
+    # every session found is reported, complete or not; training needs the ground truth
+    sessions = find_sessions(bids_root=bids_root,
+                             mask_root=mask_root,
                              flair_suffix=args.flair_suffix,
-                             t1_suffix=args.t1_suffix, 
-                             mask_suffix=args.mask_suffix, 
-                             channels=args.channels)
-    complete = [s for s in sessions if not s[4]]
-    incomplete = [s for s in sessions if s[4]]
+                             t1_suffix=args.t1_suffix,
+                             mask_suffix=args.mask_suffix,
+                             channels=args.channels,
+                             require_mask=True)
+    complete = [s for s in sessions if not s.missing]
+    incomplete = [s for s in sessions if s.missing]
 
     print(f"BIDS root : {bids_root}")
     print(f"Mask root : {mask_root}")
@@ -269,8 +159,8 @@ def main():
     print(f"Stripping : {'skipped (inputs already skull-stripped)' if args.stripped else 'HD-BET'}")
     print(f"Found     : {len(complete)} complete session(s), {len(incomplete)} incomplete session(s)\n")
 
-    for session_id, _, _, _, missing in incomplete:
-        print(f"  skip {session_id}: missing: {', '.join(missing)}")
+    for session in incomplete:
+        print(f"  skip {session.session_id}: missing: {', '.join(session.missing)}")
     if incomplete:
         print()
 
@@ -281,9 +171,9 @@ def main():
     # split the complete sessions into those already prepared and those to process
     prepared, todo = [], []
     for session in complete:
-        outputs = expected_outputs(output, session[0], args.channels)
+        outputs = expected_outputs(output, session.session_id, args.channels)
         if all(os.path.exists(p) for p in outputs.values() if p) and not args.overwrite:
-            print(f"  skip {session[0]}: already prepared (use --overwrite to redo)")
+            print(f"  skip {session.session_id}: already prepared (use --overwrite to redo)")
             prepared.append((session, outputs))
         else:
             todo.append(session)
@@ -291,13 +181,13 @@ def main():
         print()
 
     if args.dry_run:
-        for session_id, flair, t1, mask, _ in todo:
-            print(f"  {session_id}")
-            print(f"    flair {flair}")
-            if t1:
-                print(f"    t1    {t1}")
-            print(f"    mask  {mask}")
-            print(f"    out   {os.path.join(output, session_id)}{os.sep}")
+        for session in todo:
+            print(f"  {session.session_id}")
+            print(f"    flair {session.flair}")
+            if session.t1:
+                print(f"    t1    {session.t1}")
+            print(f"    mask  {session.mask}")
+            print(f"    out   {os.path.join(output, session.session_id)}{os.sep}")
         print(f"\nDry run: {len(todo)} session(s) would be processed. Nothing written.")
         return 0
 
@@ -316,53 +206,53 @@ def main():
         writer.writeheader()
 
         # The sessions this run will not touch, recorded before any processing starts.
-        for session_id, flair, t1, mask, missing in incomplete:
-            writer.writerow(manifest_row(session_id, flair, t1, mask, complete='no'))
+        for session in incomplete:
+            writer.writerow(manifest_row(session, complete='no'))
 
-        for (session_id, flair, t1, mask, _), outputs in prepared:
-            row = manifest_row(session_id, flair, t1, mask, complete='yes', prepared='yes')
-            row.update(flair_out=outputs['flair'], 
+        for session, outputs in prepared:
+            row = manifest_row(session, complete='yes', prepared='yes')
+            row.update(flair_out=outputs['flair'],
                        seg_out=outputs['seg'],
                        t1_out=outputs['t1'] or '')
             # Re-checked from disk, so the column is filled for every prepared session.
             try:
-                _, _, retained = lesion_check(row, mask, outputs['seg'])
+                _, _, retained = lesion_check(row, session.mask, outputs['seg'])
                 if retained < args.min_lesion_retention:
                     n_warned += 1
-                    print(f"  WARNING: {session_id} kept only {retained:.1%} of its lesion volume.")
+                    print(f"  WARNING: {session.session_id} kept only {retained:.1%} of its lesion volume.")
             except Exception as exc:
                 row['error'] = f"lesion check failed: {exc}"
             writer.writerow(row)
         fh.flush()
 
-        for i, (session_id, flair, t1, mask, _) in enumerate(todo, 1):
-            print(f"\n[{i}/{len(todo)}] {session_id}")
+        for i, session in enumerate(todo, 1):
+            print(f"\n[{i}/{len(todo)}] {session.session_id}")
             # Pre-filled so a failed session still records what it was given.
-            row = manifest_row(session_id, flair, t1, mask, complete='yes')
+            row = manifest_row(session, complete='yes')
             t0 = time.time()
             try:
-                written = preprocess_session(flair=flair,
-                                             gt_seg=mask,
+                written = preprocess_session(flair=session.flair,
+                                             gt_seg=session.mask,
                                              output=output,
-                                             session_id=session_id,
+                                             session_id=session.session_id,
                                              stripped=args.stripped,
-                                             t1=t1,
+                                             t1=session.t1,
                                              fast=args.fast,
                                              device=args.device,
                                              threads=args.threads)
 
                 row.update(prepared='yes',
-                           flair_out=written['flair'], 
+                           flair_out=written['flair'],
                            seg_out=written['seg'],
                            t1_out=written['t1'] or '')
-                mm3_in, mm3_out, retained = lesion_check(row, mask, written['seg'])
+                mm3_in, mm3_out, retained = lesion_check(row, session.mask, written['seg'])
                 n_ok += 1
                 print(f"  ok  {time.time() - t0:.0f}s  "
                       f"lesion {mm3_in:.0f} -> {mm3_out:.0f} mm3 ({retained:.1%} retained)")
                 if retained < args.min_lesion_retention:
                     n_warned += 1
                     print(f"  WARNING: only {retained:.1%} of the lesion volume survived the "
-                          f"warp. Is {os.path.basename(mask)} really in native FLAIR space?")
+                          f"warp. Is {os.path.basename(session.mask)} really in native FLAIR space?")
 
             # One bad session must not end the cohort run. KeyboardInterrupt still stops it.
             except Exception as exc:
