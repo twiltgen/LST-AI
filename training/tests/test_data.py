@@ -154,6 +154,9 @@ def test_augmentation_matches_tensorflow_under_a_shared_seed(subjects):
     bug: data_loader.py augments T1 before FLAIR, so T1 consumes the first gamma and
     blur draw. Iterating modalities FLAIR-first is distributionally identical but
     yields a different sample, which would silently change what a model trains on.
+
+    The image only matches where both are nonzero: TF never transformed the brain mask,
+    so its sample carries a -1 ghost of the pre-augmentation outline that ours drops.
     """
     import random
 
@@ -166,6 +169,40 @@ def test_augmentation_matches_tensorflow_under_a_shared_seed(subjects):
     random.seed(1234)
     img, targets = ds[0]
 
-    assert np.array_equal(img.numpy(), ref["img"][0].transpose(3, 0, 1, 2))
     for level, key in enumerate(("seg", "ds1", "ds2")):
         assert np.array_equal(targets[level].numpy(), ref[key][0].transpose(3, 0, 1, 2))
+
+    img, ref_img = img.numpy(), ref["img"][0].transpose(3, 0, 1, 2)
+    both = (img != 0) & (ref_img != 0)
+    assert both.any()
+    assert np.array_equal(img[both], ref_img[both])
+
+
+def test_augmentation_transforms_brain_mask_with_image(tmp_path):
+    """Rotating/flipping the image must move the brain mask too.
+
+    Uses an off-centre brain: the shared synthetic one is a centred sphere, which
+    rotation leaves almost unchanged, so a stale mask would go unnoticed.
+    """
+    import random
+
+    import nibabel as nib
+
+    grid = np.mgrid[:32, :32, :32].astype(np.float32)
+    radius = np.sqrt(((grid - np.array([10, 12, 16])[:, None, None, None]) ** 2).sum(0))
+    brain = radius < 8
+    rng = np.random.default_rng(0)
+    flair = (rng.uniform(20, 200, brain.shape) * brain).astype(np.float32)
+    seg = (radius < 3).astype(np.float32)
+    for name, vol in (("flair", flair), ("seg", seg)):
+        nib.save(nib.Nifti1Image(vol, np.eye(4)), tmp_path / f"sub-00_{name}.nii.gz")
+
+    ds = MSDataset(tmp_path, shape=SHAPE, in_channels=1, augment=True, aug_prob=0.0)
+    plain = MSDataset(tmp_path, shape=SHAPE, in_channels=1, augment=False)[0][0]
+    for seed in range(5):
+        random.seed(seed)
+        img, targets = ds[0]
+        assert not torch.equal(img, plain)
+        # A stale mask leaves a ring of -1 where the brain used to be.
+        assert (img == -1).sum() <= 1
+        assert torch.all(img[targets[0] == 1] != 0)
