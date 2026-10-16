@@ -17,7 +17,8 @@ Preprocessing, unchanged from the original:
 2. brain mask := ``flair != 0`` (the inputs are already skull-stripped);
 3. per-modality: clip to the [0.5, 99.5] in-brain percentiles, min-max to [0, 1] using
    in-brain extrema, and zero outside the mask;
-4. optional augmentation (rotation, two flips, gamma, Gaussian blur);
+4. optional augmentation (rotation, two flips, gamma, Gaussian blur). Unlike the TF
+   loader, the brain mask is rotated/flipped along with the images;
 5. deep-supervision targets by max-pooling the mask -- max, not mean, so small lesions
    survive the coarsening;
 6. rescale to [-1, 1] and re-zero outside the brain, as nnU-Net does.
@@ -149,13 +150,18 @@ class MSDataset(Dataset):
         return len(self.flair_paths)
 
     def _augment(self, mods: list[np.ndarray], gt: np.ndarray, brain: np.ndarray):
-        """Rotation, two flips, gamma and blur -- geometric ones applied to the mask too."""
+        """Rotation, two flips, gamma and blur -- geometric ones applied to both masks too.
+
+        The TF original left ``brain`` untransformed, so re-masking cut away rotated brain
+        and left a -1 ghost of the old outline. No extra ``random`` draws are made.
+        """
         if random.random() > self.aug_prob:
             angle = random.randint(-self.max_angle, self.max_angle)
             axes = random.sample(([1, 0], [2, 1]), 1)[0]
             kw = dict(angle=angle, axes=axes, reshape=False, mode="constant", cval=0.0)
             mods = [ndimage.rotate(m, order=1, **kw) for m in mods]
             gt = ndimage.rotate(gt, order=0, **kw)   # nearest, to keep the mask binary
+            brain = ndimage.rotate(brain, order=0, **kw)
 
         # Two independent flip draws, as in the original -- they can pick the same axis
         # and cancel out, which is part of the augmentation distribution it was trained on.
@@ -164,6 +170,7 @@ class MSDataset(Dataset):
                 axis = random.sample((0, 1, 2), 1)
                 mods = [np.flip(m, axis=axis) for m in mods]
                 gt = np.flip(gt, axis=axis)
+                brain = np.flip(brain, axis=axis)
 
         # Intensity augmentations touch the images only, never the mask. Each modality
         # draws its own parameter, and the *order* of those draws matters for matching
@@ -179,7 +186,8 @@ class MSDataset(Dataset):
                 mods[i] = ndimage.gaussian_filter(
                     mods[i], sigma=random.uniform(0, self.max_sigma)) * brain
 
-        return [np.ascontiguousarray(m, np.float32) for m in mods], np.ascontiguousarray(gt)
+        return ([np.ascontiguousarray(m, np.float32) for m in mods], np.ascontiguousarray(gt),
+                np.ascontiguousarray(brain))
 
     def __getitem__(self, idx: int):
         flair_path = self.flair_paths[idx]
@@ -198,7 +206,7 @@ class MSDataset(Dataset):
             mods.append(normalise_modality(t1, brain))
 
         if self.augment:
-            mods, gt = self._augment(mods, gt, brain)
+            mods, gt, brain = self._augment(mods, gt, brain)
 
         # Coarsen the mask before rescaling, so the targets stay binary. Max-pooling
         # (not mean) keeps small lesions visible at the deep-supervision resolutions.
