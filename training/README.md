@@ -37,12 +37,19 @@ stripping to prepare a cohort (the next section does exactly that for a BIDS dat
 
 ## Prepare a BIDS cohort
 
-`prepare_training_data/prepare_cohort.py` turns a raw BIDS dataset into the layout above.
+`prepare_data/` holds the two preparation pipelines: `training/` for the cohort you train
+on, `inference/` for the images you then run a model over. Both apply exactly the same
+preprocessing as `lst_ai` itself, so a model is served what it was trained on — the
+registering, stripping and warping is `prepare_data/common.py`, imported by both rather
+than copied, so the two cannot drift apart. Each pipeline only decides what it requires
+and what it writes.
+
+`prepare_data/training/prepare_cohort.py` turns a raw BIDS dataset into the layout above.
 It globs `sub-*/ses-*/anat/` for the FLAIR, derives the T1w and lesion mask from the same
 session prefix, registers to MNI, skull-strips with HD-BET, and warps the mask to match:
 
 ```bash
-python prepare_cohort.py \
+python prepare_data/training/prepare_cohort.py \
   --bids_root /data/cohort \
   --mask_root /data/cohort/derivatives/manual_segmentation \
   --output    data/train \
@@ -70,7 +77,7 @@ already done (`--overwrite` redoes it). A manifest CSV in `--output` records eve
 found along with its lesion volume before and after the warp: a mask that was not in FLAIR
 space warps to a valid but near-empty file, so check the `lesion_retained` column rather
 than trusting that the run succeeded. Then point `--train-data` straight at `--output`.
-`preprocess_session.py` does the same work for a single session.
+`prepare_data/training/preprocess_session.py` does the same work for a single session.
 
 ## Train
 
@@ -158,6 +165,50 @@ activation variance ~0.7 the epsilon shifts the denominator by 0.14%. **The slop
 one real inherited accident**: 0.3 is a Keras default rather than a choice made for this
 task, where nnU-Net and most of the literature use 0.01. If you are training fresh models
 and do not need to ensemble them with the released ones, it is worth running both.
+
+## Prepare a cohort for inference
+
+`prepare_data/inference/` runs the same preprocessing over images a model is to be *run*
+on — literally the same code, via `common.py` — so that what it is served matches what it
+was trained on. Same discovery, same suffix flags, same `--stripped` / `--channels`
+semantics, same manifest:
+
+```bash
+python prepare_data/inference/prepare_cohort.py \
+  --bids_root /data/test_cohort \
+  --mask_root /data/test_cohort/derivatives/manual_segmentation \
+  --output    data/test \
+  --channels  2
+```
+
+Two things differ, both because inference is not training:
+
+**The ground truth is optional.** A session without a lesion mask is prepared anyway,
+with only its image written. Where a mask *is* found it is warped exactly as in training,
+so the image, the prediction and the ground truth all land on one MNI grid and can be
+compared voxel by voxel with no further resampling. The manifest gains a `has_mask` column
+recording which sessions have one — worth reading, since a wrong `--mask_suffix` silently
+yields a cohort with no ground truth at all rather than an error. Pass `--require_mask`
+to skip maskless sessions instead, for a cohort meant to be evaluated in full.
+
+**The FLAIR-to-MNI affine is kept**, as `<session_id>_flair-to-mni.mat`, so a prediction
+can be warped back to native FLAIR space afterwards:
+
+```python
+from lst_ai.register import apply_warp_label
+apply_warp_label(image_org_space="sub-01_ses-01_FLAIR.nii.gz",      # native FLAIR
+                 affine="sub-01_ses-01_flair-to-mni.mat",
+                 origin="pred_mni.nii.gz", target="pred_flair.nii.gz",
+                 reverse=True)
+```
+
+Prepare with the `--channels` the model was trained with: the 1- and 2-channel modes reach
+MNI by different routes and do not yield interchangeable FLAIR volumes.
+`prepare_data/inference/preprocess_session.py` does the same work for a single session,
+with `--gt_seg` optional.
+
+The output layout is the one `lst_training.inference` reads, so the next section runs
+straight off `--output`.
 
 ## Inference on a model you trained
 
